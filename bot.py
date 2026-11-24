@@ -2185,6 +2185,18 @@ async def successful_payment_handler(message: Message) -> None:
     logger.info("Stars-донат: user=%s +%s XC", user_id, xc)
 
 
+# Фолбэк: reply-команды без ответа — подсказываем, а не молчим
+@dp.message(F.text.regexp(
+    r"(?i)^[/\\.](поработить|раб|свободен|фри|цена|price|"
+    r"перекупить|перекуп|buyout|передать|transfer|"
+    r"выпороть|унизить|похвалить|заткнуть|mute)\b"
+))
+async def reply_required_hint(message: Message) -> None:
+    await message.reply(
+        "❌ Ответь этой командой на сообщение нужного игрока."
+    )
+
+
 # =========================
 # ADMIN (скрытые команды)
 # =========================
