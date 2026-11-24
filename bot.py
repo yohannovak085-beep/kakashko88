@@ -797,34 +797,74 @@ async def free_slave(owner_id: int, slave_id: int) -> bool:
 # ENSLAVE
 # =========================
 
-@dp.message(F.text.regexp(r"(?i)^[/\\.](поработить|раб)$"), F.reply_to_message)
+@dp.message(F.text.regexp(r"(?i)^[/\\.](поработить|раб)$"))
 async def enslave_command(message: Message) -> None:
     actor = message.from_user
-    target = message.reply_to_message.from_user if message.reply_to_message else None
-
     if not actor or actor.is_bot:
         return
-    if not target or target.is_bot:
+
+    target = (
+        message.reply_to_message.from_user
+        if message.reply_to_message else None
+    )
+    if target and target.is_bot:
         await message.reply("❌ Нельзя поработить бота.")
         return
-    if target.id == actor.id:
+    if target and target.id == actor.id:
         await message.reply("😅 Нельзя поработить самого себя!")
         return
 
     now = int(time.time())
+    random_pick = target is None
+    target_id = target.id if target else 0
+    target_name = display_name(target) if target else ""
+    target_data = None
 
     async with db_lock:
         await ensure_user(actor)
-        await ensure_user(target)
         assert db is not None
         await db.commit()
 
         actor_data = await get_user(actor.id)
-        target_data = await get_user(target.id)
 
         if actor_data["slave_of"]:
             await message.reply("⛓️ Ты сам в рабстве — порабощать нельзя!")
             return
+
+        if target:
+            await ensure_user(target)
+            await db.commit()
+            target_data = await get_user(target.id)
+        else:
+            # Без ответа — случайная свободная жертва:
+            # сначала из этого чата, потом глобально.
+            for extra in ("AND last_chat_id = ?", ""):
+                params = [actor.id, now]
+                if extra:
+                    params.append(message.chat.id)
+                cursor = await db.execute(
+                    f"""
+                    SELECT * FROM users
+                    WHERE user_id != ?
+                      AND slave_of IS NULL
+                      AND escape_immune_until <= ?
+                      {extra}
+                    ORDER BY RANDOM()
+                    LIMIT 1
+                    """,
+                    params,
+                )
+                target_data = await cursor.fetchone()
+                if target_data:
+                    break
+            if not target_data:
+                await message.reply(
+                    "❌ Некого поработать — свободных игроков нет."
+                )
+                return
+            target_id = target_data["user_id"]
+            target_name = row_name(target_data)
+
         if target_data["slave_of"]:
             await message.reply("⛓️ Этот игрок уже чей-то раб.")
             return
@@ -851,13 +891,13 @@ async def enslave_command(message: Message) -> None:
         await db.execute(
             "UPDATE users SET slave_of = ?, enslaved_at = ? "
             "WHERE user_id = ?",
-            (actor.id, now, target.id),
+            (actor.id, now, target_id),
         )
         await db.execute(
             "INSERT INTO slaves (owner_id, slave_id, chat_id, enslaved_at) "
             "VALUES (?, ?, ?, ?) "
             "ON CONFLICT(owner_id, slave_id) DO NOTHING",
-            (actor.id, target.id, message.chat.id, now),
+            (actor.id, target_id, message.chat.id, now),
         )
         await db.execute(
             "UPDATE users SET slaves_count = slaves_count + 1 "
@@ -868,12 +908,14 @@ async def enslave_command(message: Message) -> None:
 
         actor_updated = await get_user(actor.id)
 
+    pick_note = "\n🎲 Цель выбрана случайно." if random_pick else ""
     await message.reply(
         f"⛓️ | {display_name(actor)} поработил "
-        f"{display_name(target)}.\n"
+        f"{target_name}.\n"
         f"💸 Уплачено: <b>{price} XC</b>\n"
         f"🧷 Рабов у {display_name(actor)}: "
         f"<b>{actor_updated['slaves_count']}</b>"
+        f"{pick_note}"
     )
 
 
@@ -2187,7 +2229,7 @@ async def successful_payment_handler(message: Message) -> None:
 
 # Фолбэк: reply-команды без ответа — подсказываем, а не молчим
 @dp.message(F.text.regexp(
-    r"(?i)^[/\\.](поработить|раб|свободен|фри|цена|price|"
+    r"(?i)^[/\\.](свободен|фри|цена|price|"
     r"перекупить|перекуп|buyout|передать|transfer|"
     r"выпороть|унизить|похвалить|заткнуть|mute)\b"
 ))
